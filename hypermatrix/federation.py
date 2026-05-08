@@ -3,15 +3,18 @@ Federation: the network of networks.
 
 A Federation owns a set of StemClusters and the Relations between them. It
 routes incoming (input, task_signal) pairs to the most relevant cluster — or
-spawns a brand-new cluster when the input is novel. Pathways used together
-strengthen together (Hebbian-style on the relations).
+spawns a brand-new cluster when the input is novel. Spawning a cluster also
+wires it (in both directions) to its nearest existing neighbor, so the graph
+of relations grows organically.
 
-This is the part that gives the system its "many networks, related by tasks"
-shape. The federation is *grown*; it is not pre-designed.
+This iteration keeps relations as structural artifacts that strengthen with
+use (Hebbian-style), but does NOT inject relational signals into the matched
+cluster's input during forward. Random/under-trained adapters were corrupting
+the gradient path. Functional relational composition is a future step; here
+the goal is clean per-cluster learning + correct topology growth.
 """
 
 from .novelty import NoveltyDetector
-from .numeric import project, vadd, vscale
 from .relation import Relation
 from .stem import StemCluster
 
@@ -22,7 +25,7 @@ class Federation:
         dim_in,
         dim_out,
         hidden=16,
-        affinity_threshold=0.4,
+        affinity_threshold=0.5,
         max_clusters=64,
     ):
         self.dim_in = dim_in
@@ -31,9 +34,9 @@ class Federation:
         self.max_clusters = max_clusters
 
         self.clusters = []
-        self.relations = []  # list[Relation]
+        self.relations = []
         self.novelty = NoveltyDetector(affinity_threshold=affinity_threshold)
-        self.history = []  # log of what happened, for inspection
+        self.history = []
 
     # ---------------- growth ----------------
 
@@ -42,10 +45,9 @@ class Federation:
         c.differentiate(task_signal)
         self.clusters.append(c)
 
-        # Wire the new cluster to its nearest neighbor (if any). This is the
-        # "white matter" forming on cluster birth: a new region wires into the
-        # existing brain through its closest topological neighbor.
-        neighbor, score = self.novelty.best_match(self.clusters[:-1], task_signal)
+        # Wire the new cluster to its nearest neighbor (if any) — bidirectional.
+        # Relations are first-class objects; their existence is the topology.
+        neighbor, _ = self.novelty.best_match(self.clusters[:-1], task_signal)
         if neighbor is not None:
             self.relations.append(Relation(neighbor, c))
             self.relations.append(Relation(c, neighbor))
@@ -53,74 +55,58 @@ class Federation:
 
     def _ensure_capacity(self):
         if len(self.clusters) > self.max_clusters:
-            # Soft cap: prune the least-used cluster (and its relations).
             victim = min(self.clusters, key=lambda c: c.use_count)
             self.clusters.remove(victim)
             self.relations = [
-                r for r in self.relations if r.source is not victim and r.target is not victim
+                r for r in self.relations
+                if r.source is not victim and r.target is not victim
             ]
 
-    # ---------------- inference ----------------
-
-    def _incoming_to(self, target, x_for_source):
-        """Sum messages arriving at `target` from connected sources."""
-        total = [0.0] * target.dim_in
-        for r in self.relations:
-            if r.target is not target:
-                continue
-            src_out = r.source.forward(x_for_source)
-            msg = r.transmit(src_out)
-            msg = project(msg, target.dim_in)
-            total = vadd(total, msg)
-        return total
-
-    def predict(self, x, task_signal):
-        """
-        Forward pass. If no cluster matches, spawn one (so the system can never
-        be 'stuck' — novelty *creates* the substrate it needs).
-        """
+    def _route(self, task_signal):
         novel, match, score = self.novelty.is_novel(self.clusters, task_signal)
         if novel:
             match = self._spawn(task_signal)
             self._ensure_capacity()
+            score = 1.0  # we just spawned for this exact signal
+        return match, score
 
-        incoming = self._incoming_to(match, x)
-        # Combine direct input with relational context (white-matter signal).
-        x_eff = [a + 0.5 * b for a, b in zip(x, incoming)]
-        out = match.forward(x_eff)
+    # ---------------- inference ----------------
+
+    def predict(self, x, task_signal):
+        match, score = self._route(task_signal)
+        out = match.forward(x)
         return out, match, score
 
     # ---------------- learning ----------------
 
     def step(self, x, task_signal, target, lr=0.05):
         """
-        One on-line learning step. Routes, possibly grows, reinforces the
-        chosen cluster, and strengthens the relations that fed into it.
+        One online learning step. Routes (or grows), reinforces the chosen
+        cluster, and Hebbian-updates the relations that connect to it (so
+        co-firing pathways strengthen even though they don't yet inject
+        signal during forward).
         """
-        out, cluster, score = self.predict(x, task_signal)
-        loss = cluster.reinforce(x, target, lr=lr)
+        match, score = self._route(task_signal)
+        loss = match.reinforce(x, target, lr=lr, task_signal=task_signal)
 
-        # Reinforce relations that contributed by handing them the residual
-        # (what the target cluster needed in *its* input space). This makes
-        # frequently co-firing pathways stronger — the architecture's
-        # Hebbian seam.
-        residual_in = list(x)  # crude: we treat x itself as the desired input
+        # Hebbian relation use-count: every relation touching the matched
+        # cluster increments its myelination. Adapters also nudge toward
+        # representing the input the target just saw, so they're ready for
+        # future functional use.
         for r in self.relations:
-            if r.target is cluster:
+            if r.target is match:
                 src_out = r.source.forward(x)
-                r.reinforce(src_out, residual_in, lr=lr)
+                r.reinforce(src_out, x, lr=lr * 0.5)
 
-        self.history.append(
-            {
-                "cluster": cluster.id,
-                "kind": cluster.kind,
-                "loss": loss,
-                "match_score": score,
-                "n_clusters": len(self.clusters),
-                "n_relations": len(self.relations),
-            }
-        )
-        return loss, cluster
+        self.history.append({
+            "cluster": match.id,
+            "kind": match.kind,
+            "loss": loss,
+            "match_score": score,
+            "n_clusters": len(self.clusters),
+            "n_relations": len(self.relations),
+        })
+        return loss, match
 
     # ---------------- introspection ----------------
 

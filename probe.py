@@ -38,7 +38,7 @@ def evaluate(fed, fn, task_id, n=100):
     for _ in range(n):
         x = rand_x()
         y = fn(x)
-        signal = [a + b for a, b in zip(x, task_id)]
+        signal = list(task_id)
         out, _, _ = fed.predict(x, signal)
         losses.append(sum((a - b) ** 2 for a, b in zip(out, y)))
     return statistics.mean(losses)
@@ -56,7 +56,7 @@ def baseline_zero(fn, n=200):
 
 def main():
     random.seed(7)
-    fed = Federation(dim_in=DIM, dim_out=DIM, hidden=12, affinity_threshold=0.55)
+    fed = Federation(dim_in=DIM, dim_out=DIM, hidden=16, affinity_threshold=0.5)
 
     schedule = [
         ("identity", 80),
@@ -77,7 +77,7 @@ def main():
         for _ in range(n):
             x = rand_x()
             target = fn(x)
-            signal = [a + b for a, b in zip(x, task_id)]
+            signal = list(task_id)
             n_before = len(fed.clusters)
             fed.step(x, signal, target, lr=0.08)
             if len(fed.clusters) > n_before:
@@ -115,7 +115,7 @@ def main():
     for _ in range(10):
         x = rand_x()
         y = fn(x)
-        signal = [a + b for a, b in zip(x, task_id)]
+        signal = list(task_id)
         fed.step(x, signal, y, lr=0.08)
     after = evaluate(fed, fn, task_id)
     print(f"  identity loss before refresher = {before:.3f}")

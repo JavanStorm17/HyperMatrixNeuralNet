@@ -70,7 +70,9 @@ def main():
         for _ in range(n):
             x = random_input()
             target = fn(x)
-            signal = [a + b for a, b in zip(x, task_id)]  # input + task tag
+            # Route by task identity alone — input variability shouldn't
+            # fragment a single task across multiple specialists.
+            signal = list(task_id)
             loss, cluster = fed.step(x, signal, target, lr=0.08)
             step += 1
             if step % 5 == 0:
